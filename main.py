@@ -1,6 +1,7 @@
 import json
-import requests
 import asyncio
+import datetime
+import aiohttp
 import os
 import datetime
 
@@ -9,7 +10,7 @@ from discord.ext import commands, tasks
 from addict import Dict as dotdict
 import aiofiles
 
-REQUEST_URL = "https://splatoon.oatmealdome.me/api/v1/three/versus/phases?count=12"
+REQUEST_URL = "https://splatoon3.ink/data/schedules.json"
 MODES = ["Bankara", "BankaraOpen", "X"]
 REVERSE_MODE_MAP = {'x': "X", 'open': 'BankaraOpen', 'series': 'Bankara'}
 LETTERS = 'abcdefghijkl'
@@ -30,28 +31,16 @@ async def save_subscribers(users):
         await fh.write(data)
 
 
-async def get_rot_data(retry=3, sleep=2):
-    success = False
-    res = None
-
-    for _ in range(retry):
-        try:
-            res = requests.get(REQUEST_URL)
-            if res.status_code == 200:
-                success = True
-                break
-        except Exception as e:
-            print("ERROR >>", e)
-
-        await asyncio.sleep(sleep)
-
-    data = json.loads(res._content.decode()) if success else {}
-    rotations = data.get('normal') or []
-    return [dotdict(r) for r in rotations]
-
-
-### main:
-
+async def get_rot_data():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(REQUEST_URL) as res:
+            if res.status != 200:
+                print("Failed to fetch schedules.json")
+                return []
+            data = await res.json()
+            rotations = data.get("normal", [])
+            return [dotdict(r) for r in rotations]
+        
 with open('.config.json', 'r') as fh:
     cfg = dotdict(json.load(fh))
 
@@ -71,7 +60,14 @@ async def build_zones_message(modes):
     rotations = await get_rot_data()
     out_data = []
 
+    now = datetime.datetime.utcnow()
+    cutoff = now + datetime.timedelta(hours=24)
+
     for r in rotations:
+        start_time = datetime.datetime.fromisoformat(r.startTime.replace("Z", "+00:00"))
+        if start_time > cutoff:
+            continue  # only next 24 hours
+
         sz = None
         for m in modes:
             if r[m].rule == "Area":
@@ -82,14 +78,13 @@ async def build_zones_message(modes):
                 break
 
         if sz is not None:
-            unix_time = int(datetime.datetime.fromisoformat(r.startTime).timestamp())
+            unix_time = int(start_time.timestamp())
             out_data.append(
                 f"{LETTERS[len(out_data)]}) <t:{unix_time}:t> - {sz.mode} - {sz.stages[0]} / {sz.stages[1]}"
             )
 
     if out_data:
         return "Zones rotations in the next 24 hours:\n" + "\n".join(out_data)
-
     return "No zones rotations found for the next 24H."
 
 
